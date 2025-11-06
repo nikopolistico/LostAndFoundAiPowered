@@ -1,0 +1,4 @@
+.env
+# If you have other secrets in backend, add them here as well
+node_modules
+uploads/
