@@ -52,6 +52,93 @@
           >
             Sign In Manually
           </button>
+
+          <div class="border-t border-gray-800 pt-4 space-y-3">
+            <button
+              v-if="registrationAllowed"
+              @click="showRegister = !showRegister"
+              class="w-full py-2 text-sm font-semibold rounded-xl border border-yellow-500 text-yellow-400 hover:bg-yellow-500 hover:text-black transition"
+            >
+              {{ showRegister ? "Hide Administrator Registration" : "Register an Administrator" }}
+            </button>
+            <p v-else class="text-xs text-gray-500">
+              Administrator registration is locked. Contact the system maintainer to provision access.
+            </p>
+
+            <form
+              v-if="showRegister && registrationAllowed"
+              @submit.prevent="handleBootstrapRegister"
+              class="space-y-3 bg-gray-900/70 border border-gray-800 rounded-xl p-4"
+            >
+              <p class="text-sm text-gray-300">
+                Create an administrator account with a strong password. This action is audited.
+              </p>
+
+              <div class="grid gap-3">
+                <div>
+                  <label class="block text-gray-300 mb-1 text-xs uppercase tracking-wide">Full Name</label>
+                  <input
+                    v-model="registerFullName"
+                    type="text"
+                    placeholder="Admin Name"
+                    class="w-full px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 text-gray-200 focus:ring-2 focus:ring-yellow-400 outline-none transition"
+                  />
+                </div>
+
+                <div>
+                  <label class="block text-gray-300 mb-1 text-xs uppercase tracking-wide">Administrator Email</label>
+                  <input
+                    v-model="registerEmail"
+                    type="email"
+                    required
+                    placeholder="admin.name@carsu.edu.ph"
+                    class="w-full px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 text-gray-200 focus:ring-2 focus:ring-yellow-400 outline-none transition"
+                  />
+                </div>
+
+                <div>
+                  <label class="block text-gray-300 mb-1 text-xs uppercase tracking-wide">Password</label>
+                  <input
+                    v-model="registerPassword"
+                    type="password"
+                    required
+                    minlength="12"
+                    placeholder="Minimum 12 characters"
+                    class="w-full px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 text-gray-200 focus:ring-2 focus:ring-yellow-400 outline-none transition"
+                  />
+                </div>
+
+                <div>
+                  <label class="block text-gray-300 mb-1 text-xs uppercase tracking-wide">Confirm Password</label>
+                  <input
+                    v-model="registerConfirm"
+                    type="password"
+                    required
+                    placeholder="Retype password"
+                    class="w-full px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 text-gray-200 focus:ring-2 focus:ring-yellow-400 outline-none transition"
+                  />
+                </div>
+
+                <div v-if="registrationRequiresKey">
+                  <label class="block text-gray-300 mb-1 text-xs uppercase tracking-wide">Bootstrap Key</label>
+                  <input
+                    v-model="registerKey"
+                    type="text"
+                    placeholder="Enter administrator bootstrap key"
+                    class="w-full px-3 py-2 rounded-lg bg-gray-900 border border-gray-700 text-gray-200 focus:ring-2 focus:ring-yellow-400 outline-none transition"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                :disabled="registerLoading"
+                class="w-full py-2 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-500 transition disabled:opacity-60"
+              >
+                {{ registerLoading ? "Registering..." : "Create Administrator Account" }}
+              </button>
+            </form>
+          </div>
         </div>
 
         <div class="flex flex-col justify-between bg-gray-900/70 border border-gray-800 rounded-xl p-5 space-y-4">
@@ -94,7 +181,7 @@
 
 <script setup>
 /* global google */
-import { onMounted, ref } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 
 const router = useRouter();
@@ -103,6 +190,18 @@ const loginEmail = ref("");
 const loginPassword = ref("");
 const errorMessage = ref("");
 const successMessage = ref("");
+
+const bootstrapStatus = ref({ allowRegistration: false, requireKey: false, adminCount: null });
+const showRegister = ref(false);
+const registerEmail = ref("");
+const registerPassword = ref("");
+const registerConfirm = ref("");
+const registerFullName = ref("");
+const registerKey = ref("");
+const registerLoading = ref(false);
+
+const registrationAllowed = computed(() => Boolean(bootstrapStatus.value.allowRegistration));
+const registrationRequiresKey = computed(() => Boolean(bootstrapStatus.value.requireKey));
 
 let clientId = "";
 let googleLoaded = false;
@@ -191,6 +290,99 @@ const redirectToDashboard = () => {
   }, 600);
 };
 
+const fetchBootstrapStatus = async () => {
+  try {
+    const res = await fetch("http://localhost:5000/api/auth/admin-bootstrap-status");
+    if (!res.ok) return;
+    const data = await res.json();
+    bootstrapStatus.value = data;
+    if (!data.allowRegistration) {
+      showRegister.value = false;
+    }
+  } catch (err) {
+    console.error("Failed to load admin registration status:", err);
+  }
+};
+
+const resetRegisterForm = () => {
+  registerEmail.value = "";
+  registerPassword.value = "";
+  registerConfirm.value = "";
+  registerFullName.value = "";
+  registerKey.value = "";
+};
+
+const handleBootstrapRegister = async () => {
+  errorMessage.value = "";
+  successMessage.value = "";
+
+  if (!registrationAllowed.value) {
+    errorMessage.value = "Administrator registration is currently disabled.";
+    return;
+  }
+
+  const email = registerEmail.value.trim().toLowerCase();
+  if (!email.endsWith("@carsu.edu.ph")) {
+    errorMessage.value = "Administrator email must end with @carsu.edu.ph.";
+    return;
+  }
+
+  if (!registerPassword.value || registerPassword.value.length < 12) {
+    errorMessage.value = "Password must be at least 12 characters long.";
+    return;
+  }
+
+  if (registerPassword.value !== registerConfirm.value) {
+    errorMessage.value = "Password confirmation does not match.";
+    return;
+  }
+
+  if (registrationRequiresKey.value && !registerKey.value.trim()) {
+    errorMessage.value = "Bootstrap key is required to register an administrator.";
+    return;
+  }
+
+  registerLoading.value = true;
+
+  try {
+    const payload = {
+      email,
+      password: registerPassword.value,
+      fullName: registerFullName.value.trim() || undefined,
+    };
+
+    if (registrationRequiresKey.value) {
+      payload.bootstrapKey = registerKey.value.trim();
+    }
+
+    const res = await fetch("http://localhost:5000/api/auth/admin-bootstrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    const data = await res.json();
+    if (!res.ok) {
+      errorMessage.value = data.error || "Administrator registration failed.";
+      return;
+    }
+
+    localStorage.setItem("token", data.token);
+    localStorage.setItem("user", JSON.stringify(data.user));
+
+    successMessage.value = "Administrator registered! Redirecting...";
+    showRegister.value = false;
+    resetRegisterForm();
+    await fetchBootstrapStatus();
+    redirectToDashboard();
+  } catch (err) {
+    console.error("Admin registration failed:", err);
+    errorMessage.value = "Unable to register administrator right now.";
+  } finally {
+    registerLoading.value = false;
+  }
+};
+
 const loadGoogleScript = () => {
   if (googleLoaded) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -236,6 +428,12 @@ const renderGoogleButton = () => {
   });
 };
 
+const ensureGoogleButton = async () => {
+  if (!googleInit) return;
+  await nextTick();
+  renderGoogleButton();
+};
+
 const initGoogle = async () => {
   try {
     const res = await fetch("http://localhost:5000/api/auth/google-client-id");
@@ -243,6 +441,7 @@ const initGoogle = async () => {
     clientId = data.clientId;
     await loadGoogleScript();
     initializeGoogle();
+    await ensureGoogleButton();
   } catch (err) {
     console.error("Failed to initialize Google Sign-In:", err);
     errorMessage.value = "Failed to load Google Sign-In.";
@@ -251,6 +450,11 @@ const initGoogle = async () => {
 
 onMounted(() => {
   initGoogle();
+  fetchBootstrapStatus();
+});
+
+watch(showRegister, () => {
+  ensureGoogleButton();
 });
 </script>
 

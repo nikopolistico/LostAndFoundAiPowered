@@ -3,11 +3,23 @@ import { authenticateJWT } from "../middleware/authenticateJWT.js";
 import pool from "../db.js";
 import fs from "fs";
 import path from "path";
+import { setUserPassword } from "../services/localAuth.js";
 
 const router = express.Router();
 
 const validateUniversityEmail = (email = "") =>
   String(email).toLowerCase().trim().endsWith("@carsu.edu.ph");
+
+const generateTemporaryPassword = (length = 14) => {
+  const charset =
+    "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*";
+  let value = "";
+  for (let i = 0; i < length; i += 1) {
+    const index = Math.floor(Math.random() * charset.length);
+    value += charset[index];
+  }
+  return value;
+};
 
 // ========================
 // 🔹 Get All Users (For Admin Dashboard)
@@ -23,6 +35,7 @@ router.get("/", async (req, res) => {
         user_type,
         department,
         contact_number,
+        on_duty,
         birthday,
         profile_picture,
         created_at
@@ -50,6 +63,7 @@ router.post("/staff", authenticateJWT, async (req, res) => {
       full_name: fullName,
       department,
       contact_number: contactNumber,
+      password,
     } = req.body || {};
 
     if (!email || !validateUniversityEmail(email)) {
@@ -59,6 +73,19 @@ router.post("/staff", authenticateJWT, async (req, res) => {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
+
+    let chosenPassword = "";
+    if (password) {
+      const trimmed = String(password).trim();
+      if (trimmed.length < 12) {
+        return res.status(400).json({
+          error: "Password must be at least 12 characters long.",
+        });
+      }
+      chosenPassword = trimmed;
+    } else {
+      chosenPassword = generateTemporaryPassword();
+    }
 
     const existingUser = await pool.query(
       `SELECT id, role, full_name, department, contact_number
@@ -83,7 +110,7 @@ router.post("/staff", authenticateJWT, async (req, res) => {
              department = COALESCE($3, department),
              contact_number = COALESCE($4, contact_number)
          WHERE id = $5
-         RETURNING id, full_name, email, role, department, contact_number, created_at`,
+         RETURNING id, full_name, email, role, department, contact_number, on_duty, created_at`,
         [
           "security",
           fullName || null,
@@ -93,16 +120,20 @@ router.post("/staff", authenticateJWT, async (req, res) => {
         ]
       );
 
+      const updatedUser = updated.rows[0];
+      await setUserPassword(updatedUser.id, chosenPassword);
+
       return res.json({
         message: "Existing user elevated to security staff",
-        user: updated.rows[0],
+        user: updatedUser,
+        temporaryPassword: password ? undefined : chosenPassword,
       });
     }
 
     const inserted = await pool.query(
       `INSERT INTO users (email, role, full_name, department, contact_number)
        VALUES ($1, $2, $3, $4, $5)
-       RETURNING id, full_name, email, role, department, contact_number, created_at`,
+       RETURNING id, full_name, email, role, department, contact_number, on_duty, created_at`,
       [
         normalizedEmail,
         "security",
@@ -112,12 +143,56 @@ router.post("/staff", authenticateJWT, async (req, res) => {
       ]
     );
 
+    const createdUser = inserted.rows[0];
+    await setUserPassword(createdUser.id, chosenPassword);
+
     return res.status(201).json({
       message: "Security staff registered",
-      user: inserted.rows[0],
+      user: createdUser,
+      temporaryPassword: password ? undefined : chosenPassword,
     });
   } catch (err) {
     console.error("❌ Error registering staff:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+// ========================
+// 🔹 Update Security Duty Status (Admin Only)
+// ========================
+router.put("/:id/duty", authenticateJWT, async (req, res) => {
+  try {
+    if (req.user?.role !== "admin") {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const { id } = req.params;
+    const { onDuty } = req.body || {};
+
+    const nextOnDuty = Boolean(onDuty);
+
+    const result = await pool.query(
+      `UPDATE users
+       SET on_duty = $1
+       WHERE id = $2 AND role IN ('security', 'security_staff')
+       RETURNING id, full_name, email, role, department, contact_number, on_duty, created_at`,
+      [nextOnDuty, id]
+    );
+
+    if (!result.rows.length) {
+      return res
+        .status(404)
+        .json({ error: "Security staff record not found." });
+    }
+
+    return res.json({
+      message: nextOnDuty
+        ? "Staff marked as on duty."
+        : "Staff marked as off duty.",
+      user: result.rows[0],
+    });
+  } catch (err) {
+    console.error("❌ Error updating duty status:", err);
     res.status(500).json({ error: "Server error" });
   }
 });
@@ -144,7 +219,7 @@ router.put("/:id/assign-role", authenticateJWT, async (req, res) => {
       `UPDATE users 
        SET role = $1 
        WHERE id = $2 
-       RETURNING id, full_name, email, role`,
+       RETURNING id, full_name, email, role, on_duty`,
       [role, id]
     );
 

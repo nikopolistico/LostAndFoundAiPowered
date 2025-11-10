@@ -12,7 +12,11 @@ export function initSocket() {
   if (!socket) {
     socket = io(SOCKET_URL, {
       withCredentials: true,
-      // do not force transports here; allow the client to negotiate best transport
+      autoConnect: true,
+      reconnection: true,
+      reconnectionDelay: 500,
+      reconnectionDelayMax: 5000,
+      reconnectionAttempts: Infinity,
     });
 
     socket.on("connect_error", (err) => {
@@ -21,6 +25,18 @@ export function initSocket() {
 
     socket.on("connect_timeout", (err) => {
       console.warn("Socket connect_timeout:", err);
+    });
+
+    socket.on("disconnect", (reason) => {
+      console.warn("Socket disconnected:", reason);
+      if (reason === "io server disconnect") {
+        // Server-side disconnects require manual reconnect attempts
+        try {
+          socket.connect();
+        } catch (err) {
+          console.error("Failed to trigger manual reconnect:", err);
+        }
+      }
     });
   }
 

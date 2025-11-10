@@ -103,10 +103,11 @@ router.get("/search", async (req, res) => {
     const sourceItemId = rawSourceId || null;
     const reporterId = rawReporterId || null;
 
-    const normalizedQuery =
-      typeof query === "string" && query.trim()
-        ? query.trim().toLowerCase()
-        : null;
+    const normalizedQueryRaw =
+      typeof query === "string" && query.trim() ? query.trim() : null;
+    const normalizedQuery = normalizedQueryRaw
+      ? normalizedQueryRaw.toLowerCase()
+      : null;
     const normalizedStudentFilter =
       typeof studentId === "string" && studentId.trim()
         ? studentId.trim().toLowerCase()
@@ -123,6 +124,19 @@ router.get("/search", async (req, res) => {
     // Gather the set of candidate "lost" items that belong to the reporter so we can
     // automatically pair them with any found items returned by this search.
     const candidateLostItems = new Map();
+    const notificationDiagnostics = [];
+
+    const searchDebug = {
+      reporterId,
+      sourceItemId,
+      query,
+      itemName,
+      studentId,
+      normalizedQuery,
+      normalizedNameFilter,
+      normalizedStudentFilter,
+      foundCount: Array.isArray(result.rows) ? result.rows.length : 0,
+    };
 
     if (sourceItemId) {
       try {
@@ -191,6 +205,138 @@ router.get("/search", async (req, res) => {
       }
     }
 
+    console.warn("🔎 Search match candidate load", {
+      ...searchDebug,
+      candidateLostCount: candidateLostItems.size,
+    });
+
+    if (
+      candidateLostItems.size === 0 &&
+      normalizedNameFilter &&
+      normalizedNameFilter.length >= 2
+    ) {
+      try {
+        const fallbackLostItems = await pool.query(
+          `SELECT id, reporter_id, category, name, student_id
+           FROM items
+           WHERE type = 'lost'
+             AND LOWER(name) = $1`,
+          [normalizedNameFilter]
+        );
+
+        for (const lostItem of fallbackLostItems.rows) {
+          if (!lostItem?.id) continue;
+          const merged = candidateLostItems.get(lostItem.id) || {};
+          candidateLostItems.set(lostItem.id, { ...merged, ...lostItem });
+        }
+
+        if (fallbackLostItems.rows.length === 0) {
+          notificationDiagnostics.push({
+            type: "fallback_candidate_none",
+            reason: "no_lost_items_for_name",
+            searchName: normalizedNameFilter,
+          });
+        }
+      } catch (fallbackLoadErr) {
+        console.error(
+          "⚠️ Failed to load fallback lost items for search match:",
+          fallbackLoadErr
+        );
+        notificationDiagnostics.push({
+          type: "fallback_candidate_error",
+          message: fallbackLoadErr?.message || String(fallbackLoadErr),
+          searchName: normalizedNameFilter,
+        });
+      }
+    }
+
+    if (candidateLostItems.size === 0) {
+      const studentLookupKey =
+        normalizedStudentFilter && normalizedStudentFilter.length >= 2
+          ? normalizedStudentFilter
+          : normalizedQueryRaw && /^\d{3}-\d{5}$/i.test(normalizedQueryRaw)
+          ? normalizedQueryRaw
+          : null;
+
+      if (studentLookupKey) {
+        try {
+          const studentLookupCompact = studentLookupKey.replace(/[^0-9]/g, "");
+          const fallbackByStudent = await pool.query(
+            `SELECT id, reporter_id, category, name, student_id
+             FROM items
+             WHERE type = 'lost'
+               AND (
+                 TRIM(LOWER(student_id)) = $1
+                 OR REGEXP_REPLACE(student_id, '[^0-9]', '', 'g') = $2
+               )`,
+            [studentLookupKey.toLowerCase().trim(), studentLookupCompact]
+          );
+
+          console.log("🔁 Fallback lost lookup by student", {
+            studentLookupKey,
+            studentLookupCompact,
+            matchedCount: fallbackByStudent.rows.length,
+          });
+
+          if (fallbackByStudent.rows.length === 0) {
+            const debugLostItems = await pool.query(
+              `SELECT id, type, student_id, reporter_id
+               FROM items
+               WHERE TRIM(LOWER(student_id)) = $1
+                  OR REGEXP_REPLACE(student_id, '[^0-9]', '', 'g') = $2
+               ORDER BY created_at DESC
+               LIMIT 5`,
+              [studentLookupKey.toLowerCase().trim(), studentLookupCompact]
+            );
+
+            console.log("🔧 Student lookup debug", {
+              studentLookupKey,
+              studentLookupCompact,
+              sample: debugLostItems.rows,
+            });
+          }
+
+          for (const lostItem of fallbackByStudent.rows) {
+            if (!lostItem?.id) continue;
+            const merged = candidateLostItems.get(lostItem.id) || {};
+            candidateLostItems.set(lostItem.id, { ...merged, ...lostItem });
+          }
+
+          if (fallbackByStudent.rows.length === 0) {
+            notificationDiagnostics.push({
+              type: "fallback_candidate_none",
+              reason: "no_lost_items_for_student",
+              searchStudent: studentLookupKey,
+            });
+          }
+        } catch (fallbackStudentErr) {
+          console.error(
+            "⚠️ Failed to load fallback lost items by student ID:",
+            fallbackStudentErr
+          );
+          notificationDiagnostics.push({
+            type: "fallback_candidate_error",
+            message: fallbackStudentErr?.message || String(fallbackStudentErr),
+            searchStudent: studentLookupKey,
+          });
+        }
+      }
+    }
+
+    if (candidateLostItems.size === 0) {
+      console.warn("⚠️ Search match pipeline has zero candidate lost items.", {
+        reporterId,
+        sourceItemId,
+        normalizedNameFilter,
+        normalizedStudentFilter,
+        normalizedQuery,
+        searchParams: { query, itemName, studentId },
+        foundCount: Array.isArray(result.rows) ? result.rows.length : 0,
+      });
+    }
+
+    let successfulNotification = false;
+
     if (
       candidateLostItems.size > 0 &&
       Array.isArray(result.rows) &&
@@ -215,7 +361,38 @@ router.get("/search", async (req, res) => {
             : null;
 
         for (const [lostId, lostItem] of candidateLostItems.entries()) {
-          if (!lostId || foundId === lostId) continue;
+          if (!lostId) {
+            console.error(
+              "❌ Skipping match attempt due to missing lost item id.",
+              {
+                ...searchDebug,
+                foundId,
+                lostItem,
+              }
+            );
+            continue;
+          }
+
+          if (!foundId) {
+            console.error(
+              "❌ Skipping match attempt due to missing found item id.",
+              {
+                ...searchDebug,
+                lostId,
+                foundItem,
+              }
+            );
+            continue;
+          }
+
+          if (foundId === lostId) {
+            console.log("⏭️ Skipping identical lost/found ids", {
+              ...searchDebug,
+              lostId,
+              foundId,
+            });
+            continue;
+          }
 
           const lostStudent =
             typeof lostItem?.student_id === "string" &&
@@ -243,20 +420,135 @@ router.get("/search", async (req, res) => {
               lostName === normalizedNameFilter) ||
             (foundName && lostName && foundName === lostName);
 
-          if (!studentMatches && !nameMatches) continue;
-
-          if (foundCategory && lostCategory && foundCategory !== lostCategory)
+          if (!studentMatches && !nameMatches) {
+            console.log("⏭️ No student or name match", {
+              ...searchDebug,
+              lostId,
+              foundId,
+              foundStudent,
+              lostStudent,
+              foundName,
+              lostName,
+            });
             continue;
+          }
+
+          if (foundCategory && lostCategory && foundCategory !== lostCategory) {
+            console.log("⏭️ Category mismatch", {
+              ...searchDebug,
+              lostId,
+              foundId,
+              foundCategory,
+              lostCategory,
+            });
+            continue;
+          }
 
           const existingMatch = await pool.query(
-            `SELECT 1 FROM matches
+            `SELECT id
+             FROM matches
              WHERE (lost_item_id = $1 AND found_item_id = $2)
                 OR (lost_item_id = $2 AND found_item_id = $1)
              LIMIT 1`,
             [lostId, foundId]
           );
 
-          if (existingMatch.rows.length > 0) continue;
+          const notificationUserId = lostItem?.reporter_id || reporterId;
+          const categoryForNotification =
+            lostItem?.category || foundItem.category || null;
+
+          const ensureNotificationForMatch = async (matchId) => {
+            if (!matchId) {
+              notificationDiagnostics.push({
+                type: "skipped",
+                reason: "missing_match_id",
+                lostId,
+                foundId,
+              });
+              return;
+            }
+
+            if (!notificationUserId) {
+              notificationDiagnostics.push({
+                type: "skipped",
+                reason: "missing_notification_user",
+                matchId,
+                lostId,
+                foundId,
+              });
+              return;
+            }
+            try {
+              const existingNotification = await pool.query(
+                `SELECT 1 FROM notifications
+                 WHERE match_id = $1 AND user_id = $2
+                 LIMIT 1`,
+                [matchId, notificationUserId]
+              );
+              if (existingNotification.rows.length === 0) {
+                await pool.query(
+                  `INSERT INTO notifications (user_id, item_id, match_id, category, type)
+                   VALUES ($1, $2, $3, $4, $5)`,
+                  [
+                    notificationUserId,
+                    lostId,
+                    matchId,
+                    categoryForNotification,
+                    "match_found",
+                  ]
+                );
+
+                if (io) {
+                  io.emit("newNotification", {
+                    user_id: notificationUserId,
+                    item_id: lostId,
+                    match_id: matchId,
+                    category: categoryForNotification,
+                    type: "match_found",
+                  });
+                }
+
+                notificationDiagnostics.push({
+                  type: "inserted",
+                  matchId,
+                  lostId,
+                  foundId,
+                });
+                successfulNotification = true;
+              } else {
+                notificationDiagnostics.push({
+                  type: "existing",
+                  matchId,
+                  lostId,
+                  foundId,
+                });
+                successfulNotification = true;
+              }
+            } catch (notifErr) {
+              console.error(
+                "⚠️ Failed to upsert notification for match:",
+                notifErr
+              );
+              notificationDiagnostics.push({
+                type: "error",
+                matchId,
+                lostId,
+                foundId,
+                message: notifErr?.message || String(notifErr),
+              });
+            }
+          };
+
+          if (existingMatch.rows.length > 0) {
+            console.log("ℹ️ Match already exists", {
+              ...searchDebug,
+              lostId,
+              foundId,
+              matchId: existingMatch.rows[0].id,
+            });
+            await ensureNotificationForMatch(existingMatch.rows[0].id);
+            continue;
+          }
 
           try {
             const matchInsert = await pool.query(
@@ -267,46 +559,180 @@ router.get("/search", async (req, res) => {
             );
 
             const matchId = matchInsert.rows[0].id;
-            const notificationUserId = lostItem?.reporter_id || reporterId;
-
-            if (notificationUserId) {
-              try {
-                await pool.query(
-                  `INSERT INTO notifications (user_id, item_id, match_id, category, type)
-                   VALUES ($1, $2, $3, $4, $5)`,
-                  [
-                    notificationUserId,
-                    lostId,
-                    matchId,
-                    lostItem?.category || foundItem.category || null,
-                    "match_found",
-                  ]
-                );
-              } catch (notifErr) {
-                console.error(
-                  "⚠️ Failed to insert notification for match:",
-                  notifErr
-                );
-              }
-
-              if (io) {
-                io.emit("newNotification", {
-                  user_id: notificationUserId,
-                  item_id: lostId,
-                  match_id: matchId,
-                  category: lostItem?.category || foundItem.category || null,
-                  type: "match_found",
-                });
-              }
-            }
+            await ensureNotificationForMatch(matchId);
 
             console.log(
               `💾 Search-created match ${matchId} between lost ${lostId} and found ${foundId}`
             );
           } catch (insertErr) {
-            console.error("❌ Error inserting match from search:", insertErr);
+            console.error("❌ Error inserting match from search:", {
+              ...searchDebug,
+              lostId,
+              foundId,
+              lostItem,
+              foundItem,
+              error: insertErr?.message || insertErr,
+            });
+            notificationDiagnostics.push({
+              type: "match_insert_error",
+              lostId,
+              foundId,
+              message: insertErr?.message || String(insertErr),
+            });
           }
         }
+      }
+
+      if (!successfulNotification) {
+        const fallbackFound = result.rows[0] || null;
+        const fallbackEntry = candidateLostItems.entries().next().value;
+
+        if (fallbackFound && Array.isArray(fallbackEntry)) {
+          const [fallbackLostId, fallbackLost] = fallbackEntry;
+
+          try {
+            const fallbackExisting = await pool.query(
+              `SELECT id
+               FROM matches
+               WHERE (lost_item_id = $1 AND found_item_id = $2)
+                  OR (lost_item_id = $2 AND found_item_id = $1)
+               LIMIT 1`,
+              [fallbackLostId, fallbackFound.id]
+            );
+
+            let fallbackMatchId = fallbackExisting.rows[0]?.id || null;
+
+            if (!fallbackMatchId) {
+              const inserted = await pool.query(
+                `INSERT INTO matches (lost_item_id, found_item_id, confidence, created_at)
+                 VALUES ($1::uuid, $2::uuid, $3::numeric(5,2), NOW())
+                 RETURNING id`,
+                [fallbackLostId, fallbackFound.id, 75.0]
+              );
+              fallbackMatchId = inserted.rows[0]?.id || null;
+
+              notificationDiagnostics.push({
+                type: "fallback_match_inserted",
+                lostId: fallbackLostId,
+                foundId: fallbackFound.id,
+                matchId: fallbackMatchId,
+              });
+            } else {
+              notificationDiagnostics.push({
+                type: "fallback_match_existing",
+                lostId: fallbackLostId,
+                foundId: fallbackFound.id,
+                matchId: fallbackMatchId,
+              });
+            }
+
+            if (fallbackMatchId) {
+              const fallbackUserId =
+                fallbackLost?.reporter_id || reporterId || null;
+              const fallbackCategory =
+                fallbackLost?.category || fallbackFound.category || null;
+
+              if (!fallbackUserId) {
+                notificationDiagnostics.push({
+                  type: "fallback_notification_skipped",
+                  reason: "missing_user",
+                  matchId: fallbackMatchId,
+                  lostId: fallbackLostId,
+                  foundId: fallbackFound.id,
+                });
+              } else {
+                try {
+                  const existingNotification = await pool.query(
+                    `SELECT 1 FROM notifications
+                     WHERE match_id = $1 AND user_id = $2
+                     LIMIT 1`,
+                    [fallbackMatchId, fallbackUserId]
+                  );
+
+                  if (existingNotification.rows.length === 0) {
+                    await pool.query(
+                      `INSERT INTO notifications (user_id, item_id, match_id, category, type)
+                       VALUES ($1, $2, $3, $4, $5)`,
+                      [
+                        fallbackUserId,
+                        fallbackLostId,
+                        fallbackMatchId,
+                        fallbackCategory,
+                        "match_found",
+                      ]
+                    );
+
+                    const ioForFallback = io || req.app.get("io");
+                    if (ioForFallback) {
+                      ioForFallback.emit("newNotification", {
+                        user_id: fallbackUserId,
+                        item_id: fallbackLostId,
+                        match_id: fallbackMatchId,
+                        category: fallbackCategory,
+                        type: "match_found",
+                      });
+                    }
+
+                    successfulNotification = true;
+                    notificationDiagnostics.push({
+                      type: "fallback_notification_inserted",
+                      matchId: fallbackMatchId,
+                      lostId: fallbackLostId,
+                      foundId: fallbackFound.id,
+                    });
+                  } else {
+                    successfulNotification = true;
+                    notificationDiagnostics.push({
+                      type: "fallback_notification_existing",
+                      matchId: fallbackMatchId,
+                      lostId: fallbackLostId,
+                      foundId: fallbackFound.id,
+                    });
+                  }
+                } catch (notifErr) {
+                  console.error(
+                    "❌ Failed to insert fallback notification:",
+                    notifErr
+                  );
+                  notificationDiagnostics.push({
+                    type: "fallback_notification_error",
+                    matchId: fallbackMatchId,
+                    lostId: fallbackLostId,
+                    foundId: fallbackFound.id,
+                    message: notifErr?.message || String(notifErr),
+                  });
+                }
+              }
+            }
+          } catch (fallbackErr) {
+            console.error("❌ Fallback match creation failed:", fallbackErr);
+            notificationDiagnostics.push({
+              type: "fallback_error",
+              lostId: fallbackLostId,
+              foundId: fallbackFound.id,
+              message: fallbackErr?.message || String(fallbackErr),
+            });
+          }
+        }
+      }
+    }
+
+    if (notificationDiagnostics.length > 0) {
+      console.warn(
+        "🔍 Notification diagnostics after search:",
+        notificationDiagnostics
+      );
+
+      try {
+        const diagnosticsPreview = JSON.stringify(
+          notificationDiagnostics.slice(0, 20)
+        );
+        res.set("X-Notification-Diagnostics", diagnosticsPreview);
+      } catch (headerErr) {
+        console.error(
+          "⚠️ Failed to serialize notification diagnostics header:",
+          headerErr
+        );
       }
     }
 

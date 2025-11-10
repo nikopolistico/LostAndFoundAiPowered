@@ -23,7 +23,8 @@ async function ensureClaimMessageColumn() {
 
 const uuidRegex = /^[0-9a-fA-F-]{36}$/;
 
-async function getRelatedItemIds(itemId) {
+async function getRelatedItemIds(itemId, db = pool) {
+  const executor = db && typeof db.query === "function" ? db : pool;
   const ids = new Set();
   if (itemId && typeof itemId === "string" && uuidRegex.test(itemId)) {
     ids.add(itemId);
@@ -32,7 +33,7 @@ async function getRelatedItemIds(itemId) {
   if (!itemId) return Array.from(ids);
 
   try {
-    const matchRes = await pool.query(
+    const matchRes = await executor.query(
       `SELECT lost_item_id, found_item_id
        FROM matches
        WHERE lost_item_id = $1 OR found_item_id = $1`,
@@ -98,10 +99,98 @@ router.post("/", async (req, res) => {
   try {
     await ensureClaimMessageColumn();
 
-    const { user_id, item_id, notification_id, message } = req.body;
+    const { user_id, item_id, notification_id, message, match_id } = req.body;
 
-    if (!user_id || !item_id || !notification_id) {
+    if (!user_id || !item_id) {
       return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    const normalizedNotificationId =
+      typeof notification_id === "string" && uuidRegex.test(notification_id)
+        ? notification_id
+        : null;
+    const normalizedMatchId =
+      typeof match_id === "string" && uuidRegex.test(match_id)
+        ? match_id
+        : null;
+
+    let resolvedNotificationId = normalizedNotificationId;
+
+    if (!resolvedNotificationId && normalizedMatchId) {
+      try {
+        const existingByMatch = await pool.query(
+          `SELECT id FROM notifications
+           WHERE match_id = $1 AND user_id = $2
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [normalizedMatchId, user_id]
+        );
+        if (existingByMatch.rows.length > 0) {
+          resolvedNotificationId = existingByMatch.rows[0].id;
+        }
+      } catch (err) {
+        console.error(
+          "⚠️ Failed to locate notification by match before claim:",
+          err
+        );
+      }
+    }
+
+    if (!resolvedNotificationId) {
+      try {
+        const existingByItem = await pool.query(
+          `SELECT id FROM notifications
+           WHERE user_id = $1 AND item_id = $2
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [user_id, item_id]
+        );
+        if (existingByItem.rows.length > 0) {
+          resolvedNotificationId = existingByItem.rows[0].id;
+        }
+      } catch (err) {
+        console.error(
+          "⚠️ Failed to locate notification by item before claim:",
+          err
+        );
+      }
+    }
+
+    if (!resolvedNotificationId) {
+      let derivedCategory = null;
+      try {
+        const itemMeta = await pool.query(
+          `SELECT category FROM items WHERE id = $1 LIMIT 1`,
+          [item_id]
+        );
+        derivedCategory = itemMeta.rows[0]?.category || null;
+      } catch (err) {
+        console.error(
+          "⚠️ Failed to load item category while creating notification:",
+          err
+        );
+      }
+
+      try {
+        const insertedNotification = await pool.query(
+          `INSERT INTO notifications (user_id, item_id, match_id, category, type, is_read, created_at)
+           VALUES ($1, $2, $3, $4, $5, FALSE, NOW())
+           RETURNING id`,
+          [user_id, item_id, normalizedMatchId, derivedCategory, "match_found"]
+        );
+        resolvedNotificationId = insertedNotification.rows[0]?.id || null;
+      } catch (err) {
+        console.error(
+          "❌ Failed to create notification fallback for claim:",
+          err
+        );
+      }
+    }
+
+    if (!resolvedNotificationId) {
+      return res
+        .status(400)
+        .json({ message: "Unable to resolve notification for claim" });
     }
 
     // Prevent duplicate claim
@@ -116,7 +205,9 @@ router.post("/", async (req, res) => {
       );
 
       const fallbackExisting = await pool.query(
-        `SELECT 1 FROM claims WHERE user_id = $1 AND item_id = $2 LIMIT 1`,
+        `SELECT 1 FROM claims
+         WHERE user_id = $1 AND item_id = $2 AND status != 'rejected'
+         LIMIT 1`,
         [user_id, item_id]
       );
 
@@ -126,7 +217,7 @@ router.post("/", async (req, res) => {
     } else {
       const existingClaim = await pool.query(
         `SELECT 1 FROM claims
-         WHERE user_id = $1 AND item_id = ANY($2::uuid[])
+         WHERE user_id = $1 AND item_id = ANY($2::uuid[]) AND status != 'rejected'
          LIMIT 1`,
         [user_id, sanitizedDupCheck]
       );
@@ -141,13 +232,17 @@ router.post("/", async (req, res) => {
       `INSERT INTO claims (user_id, item_id, notification_id, claimant_message, status, created_at)
        VALUES ($1, $2, $3, $4, 'pending', NOW())
        RETURNING *`,
-      [user_id, item_id, notification_id, message || null]
+      [user_id, item_id, resolvedNotificationId, message || null]
     );
 
     // Update item's user_claim_status
     await pool.query(
-      `UPDATE items SET user_claim_status = 'pending_claim', updated_at = NOW() WHERE id = $1`,
-      [item_id]
+      `UPDATE items
+       SET user_claim_status = 'pending_claim',
+           claimant_id = $2,
+           updated_at = NOW()
+       WHERE id = $1`,
+      [item_id, user_id]
     );
 
     const newClaim = result.rows[0];
@@ -195,7 +290,7 @@ router.post("/", async (req, res) => {
             WHERE c.item_id IN (lost_item_id, found_item_id)
             LIMIT 1
           ) m ON TRUE
-          WHERE c.id = $1
+            WHERE c.id = $1
           LIMIT 1
         `,
           [newClaim.id]
@@ -225,6 +320,45 @@ router.post("/", async (req, res) => {
       }
     } catch (e) {
       // non-fatal
+    }
+
+    // Notify the claimant's sessions to refresh notifications so the match hides while under review
+    try {
+      const io = req.app.get("io");
+      if (io) {
+        const notificationMetaRes = resolvedNotificationId
+          ? await pool.query(
+              `SELECT id, user_id, match_id, category, item_id
+               FROM notifications
+               WHERE id = $1
+               LIMIT 1`,
+              [resolvedNotificationId]
+            )
+          : { rows: [] };
+
+        const notifMeta = notificationMetaRes.rows[0] || null;
+        const targetUserId = notifMeta?.user_id || user_id;
+        const payload = {
+          user_id: targetUserId,
+          item_id: notifMeta?.item_id || item_id,
+          match_id: notifMeta?.match_id || normalizedMatchId,
+          notification_id: notifMeta?.id || resolvedNotificationId,
+          category: notifMeta?.category || null,
+          type: "claim_submitted",
+          action: "claim_pending",
+          claimed_item_id: item_id,
+          found_item_id: item_id,
+        };
+
+        if (targetUserId) {
+          io.emit("newNotification", payload);
+        }
+      }
+    } catch (notifyErr) {
+      console.error(
+        "⚠️ Failed to emit claim submission notification sync:",
+        notifyErr
+      );
     }
 
     res.status(201).json({
@@ -443,7 +577,7 @@ router.post("/item/:item_id", async (req, res) => {
     if (sanitizedDupCheck.length > 0) {
       const existing = await pool.query(
         `SELECT * FROM claims
-         WHERE user_id = $1 AND item_id = ANY($2::uuid[])
+         WHERE user_id = $1 AND item_id = ANY($2::uuid[]) AND status != 'rejected'
          ORDER BY created_at DESC
          LIMIT 1`,
         [user_id, sanitizedDupCheck]
@@ -455,7 +589,7 @@ router.post("/item/:item_id", async (req, res) => {
       );
       const fallbackExisting = await pool.query(
         `SELECT * FROM claims
-         WHERE user_id = $1 AND item_id = $2
+         WHERE user_id = $1 AND item_id = $2 AND status != 'rejected'
          ORDER BY created_at DESC
          LIMIT 1`,
         [user_id, item_id]
@@ -586,25 +720,132 @@ router.put("/:claim_id/reject", async (req, res) => {
   try {
     await ensureClaimMessageColumn();
     const { claim_id } = req.params;
+    const client = await pool.connect();
 
-    const result = await pool.query(
-      `UPDATE claims SET status = 'rejected', updated_at = NOW() WHERE id = $1 RETURNING *`,
-      [claim_id]
-    );
+    try {
+      // Keep claim removal and item reset atomic in case anything fails mid-way.
+      await client.query("BEGIN");
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ message: "Claim not found" });
+      const claimRes = await client.query(
+        `SELECT id, user_id, item_id, notification_id, status, claimant_message, created_at
+         FROM claims
+         WHERE id = $1
+         LIMIT 1`,
+        [claim_id]
+      );
+
+      if (claimRes.rows.length === 0) {
+        try {
+          await client.query("ROLLBACK");
+        } catch (rollbackErr) {
+          console.error(
+            "⚠️ Failed to rollback after missing claim:",
+            rollbackErr
+          );
+        }
+        return res.status(404).json({ message: "Claim not found" });
+      }
+
+      const claim = claimRes.rows[0];
+
+      let notificationMeta = null;
+      if (claim.notification_id) {
+        const notifRes = await client.query(
+          `SELECT id, user_id, item_id, match_id, category
+           FROM notifications
+           WHERE id = $1
+           LIMIT 1`,
+          [claim.notification_id]
+        );
+        notificationMeta = notifRes.rows[0] || null;
+      }
+
+      const deleteRes = await client.query(
+        `DELETE FROM claims WHERE id = $1 RETURNING id`,
+        [claim_id]
+      );
+
+      if (deleteRes.rowCount === 0) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ message: "Claim not found" });
+      }
+
+      const relatedItemIdsRaw = await getRelatedItemIds(claim.item_id, client);
+      const relatedItemIds = Array.from(
+        new Set([claim.item_id, ...(relatedItemIdsRaw || [])])
+      ).filter((id) => typeof id === "string" && uuidRegex.test(id));
+
+      // Remove any remaining claim entries across matched variants so the user can re-file cleanly.
+      if (relatedItemIds.length > 0) {
+        await client.query(
+          `DELETE FROM claims
+           WHERE user_id = $1
+             AND item_id = ANY($2::uuid[])`,
+          [claim.user_id, relatedItemIds]
+        );
+      }
+
+      await client.query(
+        `UPDATE items
+         SET user_claim_status = NULL,
+             claimant_id = NULL,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [claim.item_id]
+      );
+
+      await client.query("COMMIT");
+
+      try {
+        const io = req.app.get("io");
+        if (io) {
+          const targetUserId =
+            notificationMeta?.user_id || claim.user_id || null;
+
+          if (targetUserId) {
+            io.emit("newNotification", {
+              user_id: targetUserId,
+              item_id: notificationMeta?.item_id || claim.item_id,
+              match_id: notificationMeta?.match_id || null,
+              category: notificationMeta?.category || null,
+              type: "claim_rejected",
+              action: "claim_rejected",
+              claimed_item_id: claim.item_id,
+              found_item_id: claim.item_id,
+            });
+          }
+        }
+      } catch (notifyErr) {
+        console.error(
+          "⚠️ Failed to emit claim rejection notification sync:",
+          notifyErr
+        );
+      }
+
+      res.status(200).json({
+        message: "Claim rejected and claimant removed",
+        claim: {
+          id: claim.id,
+          user_id: claim.user_id,
+          item_id: claim.item_id,
+          status: "rejected",
+          deleted: true,
+        },
+      });
+    } catch (innerErr) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackErr) {
+        console.error(
+          "⚠️ Failed to rollback claim rejection transaction:",
+          rollbackErr
+        );
+      }
+      console.error("❌ Error rejecting claim (transaction):", innerErr);
+      return res.status(500).json({ message: "Server error", error: innerErr });
+    } finally {
+      client.release();
     }
-
-    const claim = result.rows[0];
-
-    // Sync item's user_claim_status
-    await pool.query(
-      `UPDATE items SET user_claim_status = 'rejected_claim', updated_at = NOW() WHERE id = $1`,
-      [claim.item_id]
-    );
-
-    res.status(200).json({ message: "Claim rejected", claim });
   } catch (error) {
     console.error("❌ Error rejecting claim:", error);
     res.status(500).json({ message: "Server error", error });

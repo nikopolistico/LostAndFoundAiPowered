@@ -145,7 +145,7 @@
           <div class="bg-gray-900 border border-gray-700 rounded-lg p-5 mb-6">
             <h3 class="text-lg font-semibold text-yellow-300">Register Security Staff</h3>
             <p class="text-sm text-gray-400 mt-1">
-              Add security personnel accounts directly from the admin dashboard. Staff will authenticate using Google sign-in after registration.
+              Add security personnel accounts directly. Provide a strong password or leave the field blank to auto-generate a secure temporary password for the staff member.
             </p>
 
             <form @submit.prevent="registerStaff" class="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -190,6 +190,29 @@
                 />
               </div>
 
+              <div class="flex flex-col">
+                <label class="text-sm text-gray-300 mb-1">Password</label>
+                <input
+                  v-model="staffForm.password"
+                  type="password"
+                  minlength="12"
+                  placeholder="Leave blank to auto-generate"
+                  class="px-3 py-2 rounded bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                />
+              </div>
+
+              <div class="flex flex-col">
+                <label class="text-sm text-gray-300 mb-1">Confirm Password</label>
+                <input
+                  v-model="staffForm.confirmPassword"
+                  type="password"
+                  minlength="12"
+                  placeholder="Repeat password"
+                  class="px-3 py-2 rounded bg-gray-800 border border-gray-700 text-gray-200 focus:outline-none focus:ring-2 focus:ring-yellow-400"
+                  :disabled="!staffForm.password"
+                />
+              </div>
+
               <div class="md:col-span-2 flex flex-col items-start gap-2">
                 <button
                   type="submit"
@@ -200,6 +223,9 @@
                 </button>
                 <p v-if="staffFormError" class="text-sm text-red-400">{{ staffFormError }}</p>
                 <p v-if="staffFormSuccess" class="text-sm text-green-400">{{ staffFormSuccess }}</p>
+                <p v-if="staffGeneratedPassword" class="text-sm text-yellow-300">
+                  Temporary password: <span class="font-semibold">{{ staffGeneratedPassword }}</span>
+                </p>
               </div>
             </form>
           </div>
@@ -211,61 +237,155 @@
               class="px-4 py-2 rounded-lg bg-gray-800 text-white w-64 focus:outline-none"
             />
           </div>
+          <p
+            v-if="dutyStatusMessage"
+            class="mb-4 text-sm"
+            :class="dutyStatusType === 'error' ? 'text-red-400' : 'text-green-400'"
+          >
+            {{ dutyStatusMessage }}
+          </p>
 
-          <table class="min-w-full bg-gray-900 text-left text-sm text-gray-300 rounded-lg mb-6 border border-gray-700">
-            <thead>
-              <tr class="border-b border-gray-700 bg-gray-800 text-gray-300">
-                <th class="px-4 py-2">Profile</th>
-                <th class="px-4 py-2">Name</th>
-                <th class="px-4 py-2">Email</th>
-                <th class="px-4 py-2">Role</th>
-                <th class="px-4 py-2">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="user in filteredUsers"
-                :key="user.id"
-                class="border-b border-gray-700 hover:bg-gray-800"
-              >
-                <td class="px-4 py-2">
-                  <img
-                    v-if="user.profile_picture"
-                    :src="`${API_BASE_URL}${user.profile_picture}`"
-                    class="w-10 h-10 rounded-full object-cover border border-gray-600"
-                  />
-                  <div
-                    v-else
-                    class="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold"
-                  >
-                    {{ user.full_name ? user.full_name[0].toUpperCase() : '?' }}
-                  </div>
-                </td>
-                <td class="px-4 py-2">{{ user.full_name || 'N/A' }}</td>
-                <td class="px-4 py-2">{{ user.email || 'N/A' }}</td>
-                <td class="px-4 py-2">
-                  <span v-if="user.role === 'security'">Security staff</span>
-                  <span v-else-if="user.role === 'admin'">Administrator</span>
-                  <span v-else>University member</span>
-                </td>
-                <td class="px-4 py-2 flex flex-wrap gap-1">
-                  <button
-                    @click="viewUser(user)"
-                    class="px-3 py-1 text-sm bg-yellow-500 text-black rounded hover:bg-yellow-600"
-                  >
-                    View
-                  </button>
+          <div class="space-y-8">
+            <section>
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="text-lg font-semibold text-yellow-300">Security Staff</h3>
+                <span class="text-xs text-gray-500">
+                  {{ securityUsers.length }} {{ securityUsers.length === 1 ? 'record' : 'records' }}
+                </span>
+              </div>
 
-                  <button
-                    @click="deleteUser(user)"
-                    class="px-3 py-1 text-sm bg-red-500 text-white rounded hover:bg-red-600"
-                  >
-                    Delete
-                  </button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+              <div v-if="securityUsers.length" class="overflow-x-auto rounded-lg border border-gray-700">
+                <table class="min-w-full bg-gray-900 text-left text-sm text-gray-300">
+                  <thead>
+                    <tr class="border-b border-gray-700 bg-gray-800 text-gray-300">
+                      <th class="px-4 py-2">Profile</th>
+                      <th class="px-4 py-2">Name</th>
+                      <th class="px-4 py-2">Email</th>
+                      <th class="px-4 py-2">Duty Status</th>
+                      <th class="px-4 py-2">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="user in securityUsers"
+                      :key="user.id || user.email"
+                      class="border-b border-gray-700 hover:bg-gray-800"
+                    >
+                      <td class="px-4 py-2">
+                        <img
+                          v-if="user.profile_picture"
+                          :src="`${API_BASE_URL}${user.profile_picture}`"
+                          class="w-10 h-10 rounded-full object-cover border border-gray-600"
+                        />
+                        <div
+                          v-else
+                          class="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold"
+                        >
+                          {{ user.full_name ? user.full_name[0].toUpperCase() : '?' }}
+                        </div>
+                      </td>
+                      <td class="px-4 py-2">{{ user.full_name || 'N/A' }}</td>
+                      <td class="px-4 py-2">{{ user.email || 'N/A' }}</td>
+                      <td class="px-4 py-2">
+                        <span :class="user.onDuty ? 'text-green-400' : 'text-gray-400'">
+                          {{ user.onDuty ? 'On duty' : 'Off duty' }}
+                        </span>
+                      </td>
+                      <td class="px-4 py-2 flex flex-wrap gap-1">
+                        <button
+                          @click="viewUser(user)"
+                          class="px-3 py-1 text-sm bg-yellow-500 text-black rounded hover:bg-yellow-600"
+                        >
+                          View
+                        </button>
+                        <button
+                          @click="toggleDutyStatus(user)"
+                          :disabled="dutyToggleLoading[user.id]"
+                          class="px-3 py-1 text-sm rounded transition"
+                          :class="user.onDuty
+                            ? 'bg-blue-600 text-white hover:bg-blue-500'
+                            : 'bg-green-600 text-white hover:bg-green-500'"
+                        >
+                          {{ dutyToggleLoading[user.id]
+                            ? 'Updating...'
+                            : user.onDuty
+                              ? 'Mark off duty'
+                              : 'Mark on duty' }}
+                        </button>
+                        <button
+                          @click="deleteUser(user)"
+                          class="px-3 py-1 text-sm bg-red-500 text-white rounded hover:bg-red-600"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p v-else class="text-xs text-gray-500">No security staff match your filters.</p>
+            </section>
+
+            <section>
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="text-lg font-semibold text-yellow-300">University Members</h3>
+                <span class="text-xs text-gray-500">
+                  {{ memberUsers.length }} {{ memberUsers.length === 1 ? 'record' : 'records' }}
+                </span>
+              </div>
+
+              <div v-if="memberUsers.length" class="overflow-x-auto rounded-lg border border-gray-700">
+                <table class="min-w-full bg-gray-900 text-left text-sm text-gray-300">
+                  <thead>
+                    <tr class="border-b border-gray-700 bg-gray-800 text-gray-300">
+                      <th class="px-4 py-2">Profile</th>
+                      <th class="px-4 py-2">Name</th>
+                      <th class="px-4 py-2">Email</th>
+                      <th class="px-4 py-2">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="user in memberUsers"
+                      :key="`member-${user.id || user.email}`"
+                      class="border-b border-gray-700 hover:bg-gray-800"
+                    >
+                      <td class="px-4 py-2">
+                        <img
+                          v-if="user.profile_picture"
+                          :src="`${API_BASE_URL}${user.profile_picture}`"
+                          class="w-10 h-10 rounded-full object-cover border border-gray-600"
+                        />
+                        <div
+                          v-else
+                          class="w-10 h-10 rounded-full bg-blue-600 flex items-center justify-center text-white font-bold"
+                        >
+                          {{ user.full_name ? user.full_name[0].toUpperCase() : '?' }}
+                        </div>
+                      </td>
+                      <td class="px-4 py-2">{{ user.full_name || 'N/A' }}</td>
+                      <td class="px-4 py-2">{{ user.email || 'N/A' }}</td>
+                      <td class="px-4 py-2 flex flex-wrap gap-1">
+                        <button
+                          @click="viewUser(user)"
+                          class="px-3 py-1 text-sm bg-yellow-500 text-black rounded hover:bg-yellow-600"
+                        >
+                          View
+                        </button>
+                        <button
+                          @click="deleteUser(user)"
+                          class="px-3 py-1 text-sm bg-red-500 text-white rounded hover:bg-red-600"
+                        >
+                          Delete
+                        </button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p v-else class="text-xs text-gray-500">No university members match your filters.</p>
+            </section>
+          </div>
         </div>
       </main>
     </div>
@@ -436,16 +556,6 @@ const activePage = ref(localStorage.getItem('admin-active-page') || 'dashboard')
 // Restore activeReportTab from localStorage or default to 'Lost Reports'
 const activeReportTab = ref(localStorage.getItem('admin-active-report-tab') || 'Lost Reports');
 
-// Auto-save activePage to localStorage
-watch(activePage, (newPage) => {
-  localStorage.setItem('admin-active-page', newPage);
-});
-
-// Auto-save activeReportTab to localStorage
-watch(activeReportTab, (newTab) => {
-  localStorage.setItem('admin-active-report-tab', newTab);
-});
-
 // ====================
 // Static Data
 // ====================
@@ -485,10 +595,16 @@ const staffForm = reactive({
   fullName: "",
   department: "",
   contactNumber: "",
+  password: "",
+  confirmPassword: "",
 });
 const staffFormError = ref("");
 const staffFormSuccess = ref("");
 const staffFormLoading = ref(false);
+const staffGeneratedPassword = ref("");
+const dutyStatusMessage = ref("");
+const dutyStatusType = ref("success");
+const dutyToggleLoading = reactive({});
 
 // ====================
 // Shared Modals
@@ -551,19 +667,59 @@ const fetchItems = async () => {
   }
 };
 
+const toRole = (role) => {
+  const normalized = String(role || "").toLowerCase();
+  if (!normalized) return "university_member";
+  if (normalized === "security_staff") return "security";
+  return normalized;
+};
+
+const mapUserRecord = (record = {}) => ({
+  ...record,
+  role: toRole(record.role),
+  onDuty: Boolean(record.on_duty),
+});
+
+const normalizeUserKey = (user = {}) =>
+  (user.email && String(user.email).toLowerCase()) || String(user.id || "");
+
+const dedupeUserRecords = (records = []) => {
+  const byKey = new Map();
+  records.forEach((record) => {
+    const mapped = mapUserRecord(record);
+    const key = normalizeUserKey(mapped);
+    if (!key) return;
+    if (byKey.has(key)) {
+      byKey.set(key, { ...byKey.get(key), ...mapped });
+    } else {
+      byKey.set(key, mapped);
+    }
+  });
+  return Array.from(byKey.values());
+};
+
+const replaceUserInList = (record) => {
+  if (!record) return;
+  const mapped = mapUserRecord(record);
+  const key = normalizeUserKey(mapped);
+  if (!key) return;
+
+  const index = users.value.findIndex(
+    (existing) => normalizeUserKey(existing) === key
+  );
+
+  if (index === -1) {
+    users.value.unshift(mapped);
+  } else {
+    users.value.splice(index, 1, mapped);
+  }
+};
+
 const fetchUsers = async () => {
   try {
     const res = await axios.get(`${API_BASE_URL}/api/user`);
-    const toRole = (role) => {
-      if (!role) return "university_member";
-      if (role === "security_staff") return "security";
-      return role;
-    };
-
-    users.value = res.data.map((u) => ({
-      ...u,
-      role: toRole(u.role),
-    }));
+    const records = Array.isArray(res.data) ? res.data : [];
+    users.value = dedupeUserRecords(records);
   } catch (err) {
     console.error("Error fetching users:", err);
   }
@@ -573,13 +729,42 @@ const fetchUsers = async () => {
 // Users Management
 // ====================
 
-const filteredUsers = computed(() => {
-  if (!userSearch.value) return users.value;
-  return users.value.filter(u =>
-    u.full_name?.toLowerCase().includes(userSearch.value.toLowerCase()) ||
-    u.email?.toLowerCase().includes(userSearch.value.toLowerCase())
+const allowedDisplayRoles = new Set(["security", "university_member"]);
+
+const matchesUserSearch = (user) => {
+  if (!userSearch.value) return true;
+  const query = userSearch.value.toLowerCase();
+  const fields = [
+    user.full_name,
+    user.email,
+    user.department,
+    user.contact_number,
+  ];
+  return fields.some((value) =>
+    value ? String(value).toLowerCase().includes(query) : false
   );
-});
+};
+
+const filteredUserPool = computed(() =>
+  users.value.filter(
+    (user) => allowedDisplayRoles.has(user.role) && matchesUserSearch(user)
+  )
+);
+
+const sortByCreatedDesc = (a, b) =>
+  new Date(b.created_at || 0) - new Date(a.created_at || 0);
+
+const securityUsers = computed(() =>
+  filteredUserPool.value
+    .filter((user) => user.role === "security")
+    .sort(sortByCreatedDesc)
+);
+
+const memberUsers = computed(() =>
+  filteredUserPool.value
+    .filter((user) => user.role === "university_member")
+    .sort(sortByCreatedDesc)
+);
 
 const viewUser = (user) => {
   selectedUser.value = user;
@@ -613,6 +798,18 @@ const resetStaffForm = () => {
   staffForm.fullName = "";
   staffForm.department = "";
   staffForm.contactNumber = "";
+  staffForm.password = "";
+  staffForm.confirmPassword = "";
+};
+
+const setDutyStatusMessage = (message, type = "success") => {
+  dutyStatusMessage.value = message;
+  dutyStatusType.value = type;
+  if (message) {
+    setTimeout(() => {
+      dutyStatusMessage.value = "";
+    }, 4000);
+  }
 };
 
 const registerStaff = async () => {
@@ -644,6 +841,25 @@ const registerStaff = async () => {
     return;
   }
 
+  const passwordTrimmed = staffForm.password.trim();
+  const confirmTrimmed = staffForm.confirmPassword.trim();
+  if (passwordTrimmed) {
+    if (passwordTrimmed.length < 12) {
+      staffFormError.value = "Password must be at least 12 characters.";
+      setTimeout(() => {
+        staffFormError.value = "";
+      }, 4000);
+      return;
+    }
+    if (passwordTrimmed !== confirmTrimmed) {
+      staffFormError.value = "Password confirmation does not match.";
+      setTimeout(() => {
+        staffFormError.value = "";
+      }, 4000);
+      return;
+    }
+  }
+
   staffFormLoading.value = true;
 
   try {
@@ -652,6 +868,7 @@ const registerStaff = async () => {
       full_name: staffForm.fullName.trim() || undefined,
       department: staffForm.department.trim() || undefined,
       contact_number: staffForm.contactNumber.trim() || undefined,
+      password: passwordTrimmed || undefined,
     };
 
     const response = await axios.post(
@@ -660,28 +877,19 @@ const registerStaff = async () => {
       { headers: { Authorization: `Bearer ${token}` } }
     );
 
-    const createdUser = response.data?.user;
-    if (createdUser) {
-      const indexById = users.value.findIndex((u) => u.id === createdUser.id);
-      if (indexById !== -1) {
-        users.value.splice(indexById, 1, createdUser);
-      } else {
-        const indexByEmail = users.value.findIndex(
-          (u) => u.email?.toLowerCase() === createdUser.email?.toLowerCase()
-        );
-        if (indexByEmail !== -1) {
-          users.value.splice(indexByEmail, 1, createdUser);
-        } else {
-          users.value.unshift(createdUser);
-        }
-      }
+    const createdUserRaw = response.data?.user;
+    if (createdUserRaw) {
+      replaceUserInList(createdUserRaw);
     }
 
     staffFormSuccess.value = response.data?.message || "Security staff registered.";
+    const issuedPassword = response.data?.temporaryPassword || "";
     resetStaffForm();
+    staffGeneratedPassword.value = issuedPassword;
     setTimeout(() => {
       staffFormSuccess.value = "";
-    }, 4000);
+      staffGeneratedPassword.value = "";
+    }, 5000);
   } catch (err) {
     const message = err.response?.data?.error || "Failed to register security staff.";
     staffFormError.value = message;
@@ -691,6 +899,36 @@ const registerStaff = async () => {
     }, 5000);
   } finally {
     staffFormLoading.value = false;
+  }
+};
+
+const toggleDutyStatus = async (user) => {
+  if (!user || user.role !== "security") return;
+
+  const token = localStorage.getItem("token");
+  if (!token) {
+    setDutyStatusMessage("Authentication expired. Please sign in again.", "error");
+    return;
+  }
+
+  dutyToggleLoading[user.id] = true;
+
+  try {
+    const response = await axios.put(
+      `${API_BASE_URL}/api/user/${user.id}/duty`,
+      { onDuty: !user.onDuty },
+      { headers: { Authorization: `Bearer ${token}` } }
+    );
+
+    replaceUserInList(response.data?.user);
+
+    setDutyStatusMessage(response.data?.message || "Duty status updated.");
+  } catch (err) {
+    const message = err.response?.data?.error || "Failed to update duty status.";
+    setDutyStatusMessage(message, "error");
+    console.error("Error updating duty status:", err);
+  } finally {
+    dutyToggleLoading[user.id] = false;
   }
 };
 
@@ -858,6 +1096,20 @@ const pendingCount = computed(() =>
 const unreadLostCount = ref(0);
 const unreadFoundCount = ref(0);
 const unreadReturnedCount = ref(0);
+const isViewingTab = (tab) =>
+  activePage.value === "reported-items" && activeReportTab.value === tab;
+
+const updateUnreadCounters = () => {
+  unreadLostCount.value = isViewingTab("Lost Reports")
+    ? 0
+    : lostItems.value.length;
+  unreadFoundCount.value = isViewingTab("Found Reports")
+    ? 0
+    : foundItems.value.length;
+  unreadReturnedCount.value = isViewingTab("Returned History")
+    ? 0
+    : returnedHistory.value.length;
+};
 
 const getUnreadCount = (tab) => {
   switch (tab) {
@@ -905,8 +1157,20 @@ socket.on("reportDeleted", ({ id }) => {
 // Lifecycle
 // ====================
 
-onMounted(() => {
-  fetchItems();
-  fetchUsers();
+onMounted(async () => {
+  await Promise.all([fetchItems(), fetchUsers()]);
+  updateUnreadCounters();
 });
+
+watch(activePage, (newPage) => {
+  localStorage.setItem('admin-active-page', newPage);
+  updateUnreadCounters();
+});
+
+watch(activeReportTab, (newTab) => {
+  localStorage.setItem('admin-active-report-tab', newTab);
+  updateUnreadCounters();
+});
+
+watch([lostItems, foundItems, returnedHistory], updateUnreadCounters, { deep: true });
 </script>

@@ -538,7 +538,7 @@
           <div v-for="claim in claimRequests" :key="claim.claim_id" class="border-b border-gray-700 py-2">
             <div class="flex justify-between items-start">
               <div>
-                <p><strong>Claimant:</strong> {{ claim.claimant_name || 'Unknown claimant' }}</p>
+                <p v-if="claim.claimant_name"><strong>Claimant:</strong> {{ claim.claimant_name || 'Unknown claimant' }}</p>
                 <p v-if="claim.claimant_email" class="text-sm text-gray-400">Email: {{ claim.claimant_email }}</p>
                 <p v-if="claim.claimant_contact" class="text-sm text-gray-400">Contact: {{ claim.claimant_contact }}</p>
                 <p v-if="claim.claimant_department" class="text-sm text-gray-400">Department: {{ claim.claimant_department }}</p>

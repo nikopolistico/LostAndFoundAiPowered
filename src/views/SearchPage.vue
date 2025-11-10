@@ -398,19 +398,19 @@
     </div>
 
     <!-- Step 4: Results -->
-    <div v-if="step === 4" class="mt-10 w-full max-w-4xl text-center">
+    <div v-if="step === 4" class="mt-10 w-full max-w-4xl mx-auto text-center">
       <h2 class="text-2xl text-yellow-400 font-semibold mb-6">Search Results</h2>
 
       <div v-if="loading" class="text-gray-400 italic">Searching...</div>
 
       <div
         v-if="!loading && results.length > 0"
-        class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6"
+        class="flex flex-wrap justify-center gap-6"
       >
         <div
           v-for="(item, index) in results"
           :key="index"
-          class="bg-gray-900 p-4 rounded-xl shadow-lg"
+          class="bg-gray-900 p-4 rounded-xl shadow-lg w-full max-w-xs text-center"
         >
           <img
             :src="formatImageUrl(item.image_url)"

@@ -374,6 +374,8 @@ export default {
       notificationPollTimer: null,
       notificationsInitialized: false,
       latestNotificationSignature: null,
+      isSocketConnected: false,
+      socketReconnectAttempts: 0,
     };
   },
   computed: {
@@ -464,6 +466,33 @@ export default {
     },
   },
   methods: {
+    isValidUuid(value) {
+      if (typeof value !== "string") return false;
+      const trimmed = value.trim();
+      return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(trimmed);
+    },
+
+    normalizeUuid(value) {
+      return this.isValidUuid(value) ? value.trim() : null;
+    },
+
+    onSocketConnect() {
+      this.isSocketConnected = true;
+      this.socketReconnectAttempts = 0;
+      const syncOptions = this.notificationsInitialized
+        ? { autoPreview: true }
+        : { markInitial: true };
+      this.loadNotifications(syncOptions);
+    },
+
+    onSocketDisconnect() {
+      this.isSocketConnected = false;
+    },
+
+    onSocketReconnectAttempt(attemptNumber) {
+      this.socketReconnectAttempts = attemptNumber || 0;
+    },
+
     normalizeClaimStatus(value) {
       if (value === undefined || value === null) return null;
       if (typeof value === "string") return value.trim().toLowerCase();
@@ -540,8 +569,8 @@ export default {
 
         const data = await res.json();
 
-        // ✅ Make sure to include the correct item_id from backend
-        const mapped = data.map((n) => {
+    // ✅ Make sure to include the correct item_id from backend
+    const mapped = data.map((n) => {
           const baseClaimStatus = this.normalizeClaimStatus(
             n.base_user_claim_status
           );
@@ -594,14 +623,18 @@ export default {
               ? matchedClaimStatus || null
               : baseClaimStatus || matchedClaimStatus || null;
 
+          const persistedNotificationId = this.normalizeUuid(n.id);
+          const normalizedMatchId = this.normalizeUuid(n.match_id);
+
           return {
-            id: n.id || `match-${n.match_id}`,
-            notification_id: n.id || null,
+            id: persistedNotificationId || (normalizedMatchId ? `match-${normalizedMatchId}` : `match-${n.match_id}`),
+            has_persisted_notification: Boolean(persistedNotificationId),
+            notification_id: persistedNotificationId,
             item_id: n.item_id,
             lost_item_id: lostItemId,
             found_item_id: foundItemId,
             matched_item_id: n.matched_item_id || null,
-            match_id: n.match_id,
+            match_id: normalizedMatchId || n.match_id || null,
             category: n.category,
             message,
             display_name: displayName,
@@ -620,7 +653,12 @@ export default {
 
         mapped.sort((a, b) => b.created_at_ts - a.created_at_ts);
 
-        this.notifications = mapped;
+        const filtered = mapped.filter((entry) => {
+          const status = this.normalizeClaimStatus(entry.claim_status);
+          return !status || status === "rejected_claim";
+        });
+
+        this.notifications = filtered;
 
         if (this.selectedMatch) {
           const key =
@@ -630,7 +668,7 @@ export default {
             this.selectedMatch.item_id ||
             null;
           if (key) {
-            const refreshed = this.notifications.find((n) => {
+            const refreshed = filtered.find((n) => {
               const candidate =
                 n.match_id || n.notification_id || n.id || n.item_id || null;
               return candidate && String(candidate) === String(key);
@@ -641,7 +679,7 @@ export default {
           }
         }
 
-        const newest = this.notifications[0] || null;
+        const newest = filtered[0] || null;
 
         if (!this.notificationsInitialized && markInitial) {
           this.notificationsInitialized = true;
@@ -652,7 +690,7 @@ export default {
           this.tryAutoPreviewLatest(newest);
         }
 
-        return mapped;
+        return filtered;
       } catch (err) {
         console.error("❌ Error loading notifications:", err);
       }
@@ -736,21 +774,61 @@ export default {
         const user = JSON.parse(localStorage.getItem("user"));
         if (!user?.id) return;
 
-        // Only react if this event is for the logged-in user
-        if (String(evt.user_id) !== String(user.id)) return;
+        if (evt && String(evt.user_id) !== String(user.id)) return;
 
-        // Refresh list to get complete display fields
-        await this.loadNotifications();
+        const eventType = (evt?.type || "").toLowerCase();
+        const eventAction = (evt?.action || "").toLowerCase();
 
-        const newly = this.findNotificationForEvent(evt);
-        const target = newly || this.notifications[0] || null;
+        const shouldAutoPreview =
+          eventType === "match_found" || (!eventType && !eventAction);
+
+        await this.loadNotifications({
+          autoPreview:
+            shouldAutoPreview &&
+            eventType !== "claim_rejected" &&
+            eventAction !== "claim_rejected",
+        });
+
+        if (eventType === "claim_submitted" || eventAction === "claim_pending") {
+          if (!this.claimResultMessage) {
+            this.claimResultMessage =
+              "Your claim is now under review by Security. We'll notify you once there's an update.";
+            setTimeout(() => {
+              this.claimResultMessage = "";
+            }, 9000);
+          }
+          return;
+        }
+
+        const target =
+          this.findNotificationForEvent(evt) || this.notifications[0] || null;
         if (!target) return;
+
+        if (eventType === "claim_rejected" || eventAction === "claim_rejected") {
+          this.claimResultMessage =
+            "Security could not verify your claim. You may review the match details and try again.";
+          setTimeout(() => {
+            this.claimResultMessage = "";
+          }, 9000);
+        }
+
+        const shouldOpenModal =
+          eventType === "claim_rejected" ||
+          eventType === "match_found" ||
+          (!eventType && !eventAction);
+
+        if (!shouldOpenModal) return;
 
         const signature = this.buildNotificationSignature(target);
         if (signature === this.latestNotificationSignature) return;
 
+        const showDesktopNotice =
+          eventType === "match_found" || eventType === "claim_rejected";
+
         this.latestNotificationSignature = signature;
-        this.triggerNotificationPreview(target, { showBrowserNotification: true });
+        this.triggerNotificationPreview(target, {
+          showBrowserNotification: showDesktopNotice,
+        });
       } catch (e) {
         console.error("Error handling realtime match event:", e);
       }
@@ -795,14 +873,12 @@ export default {
           );
         }
 
-        const targetNotificationId =
-          this.selectedMatch.notification_id || this.selectedMatch.id;
-
-        if (!targetNotificationId) {
-          throw new Error(
-            "Unable to submit claim: missing notification reference for this match."
-          );
-        }
+        const rawNotificationId =
+          this.selectedMatch.notification_id || this.selectedMatch.id || null;
+        const normalizedNotificationId = this.normalizeUuid(rawNotificationId);
+        const normalizedMatchId = this.normalizeUuid(
+          this.selectedMatch.match_id || null
+        );
 
         const res = await fetch(`http://localhost:5000/api/claims`, {
           method: "POST",
@@ -810,7 +886,8 @@ export default {
           body: JSON.stringify({
             user_id: user.id,
             item_id: foundItemId,
-            notification_id: targetNotificationId,
+            notification_id: normalizedNotificationId,
+            match_id: normalizedMatchId,
             message: this.claimMessage,
           }),
         });
@@ -880,11 +957,17 @@ export default {
       if (this.socket) {
         try {
           this.socket.off("newNotification", this.handleNewNotificationEvent);
+          this.socket.off("connect", this.onSocketConnect);
+          this.socket.off("disconnect", this.onSocketDisconnect);
+          if (this.socket.io) {
+            this.socket.io.off("reconnect_attempt", this.onSocketReconnectAttempt);
+          }
         } catch (err) {
           console.warn("Failed to remove socket listener on logout:", err);
         }
       }
 
+      this.isSocketConnected = false;
       disconnectSocket();
       this.socket = null;
       localStorage.clear();
@@ -929,8 +1012,27 @@ export default {
     // Setup Socket.io for realtime notifications (shared singleton)
     try {
       this.socket = initSocket();
+      if (this.socket.disconnected) {
+        try {
+          this.socket.connect();
+        } catch (err) {
+          console.error("Failed to initiate socket connect:", err);
+        }
+      }
+
+      this.isSocketConnected = this.socket.connected;
+      this.socketReconnectAttempts = 0;
+
       // Attach only the listeners this component needs. Do not disconnect the shared socket on unmount;
       // just remove listeners so other components using the socket are unaffected.
+      this.socket.on("connect", this.onSocketConnect);
+      this.socket.on("disconnect", this.onSocketDisconnect);
+      if (this.socket.io) {
+        this.socket.io.on(
+          "reconnect_attempt",
+          this.onSocketReconnectAttempt
+        );
+      }
       this.socket.on("newNotification", this.handleNewNotificationEvent);
     } catch (e) {
       console.error("Failed to initialize realtime socket:", e);
@@ -945,6 +1047,14 @@ export default {
     if (this.socket) {
       try {
         this.socket.off("newNotification", this.handleNewNotificationEvent);
+        this.socket.off("connect", this.onSocketConnect);
+        this.socket.off("disconnect", this.onSocketDisconnect);
+        if (this.socket.io) {
+          this.socket.io.off(
+            "reconnect_attempt",
+            this.onSocketReconnectAttempt
+          );
+        }
         // Do not call disconnect() on the shared socket here. Other components may still need it.
       } catch (e) {
         // Non-fatal: ignore socket cleanup errors during unmount

@@ -194,7 +194,7 @@
 
 <script setup>
 /* global google */
-import { onMounted, ref, watch } from "vue";
+import { nextTick, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { jwtDecode } from "jwt-decode";
 
@@ -231,7 +231,7 @@ const switchTab = (tab) => {
   successMessage.value = "";
   const query = tab === "register" ? { tab: "register" } : {};
   router.replace({ query }).catch(() => {});
-  renderGoogleButtons();
+  ensureGoogleButtons();
 };
 
 const tabClass = (tab) => {
@@ -257,6 +257,10 @@ const handleManualLogin = async () => {
   const email = loginEmail.value.trim().toLowerCase();
   if (!email.endsWith("@carsu.edu.ph")) {
     errorMessage.value = "Login email must end with @carsu.edu.ph.";
+    return;
+  }
+  if (!loginPassword.value) {
+    errorMessage.value = "Password is required to sign in.";
     return;
   }
 
@@ -301,6 +305,10 @@ const handleManualRegister = async () => {
     errorMessage.value = "Registration email must end with @carsu.edu.ph.";
     return;
   }
+  if (!registerPassword.value || registerPassword.value.length < 8) {
+    errorMessage.value = "Password must be at least 8 characters long.";
+    return;
+  }
   if (!acceptedTerms.value) {
     showTermsError();
     return;
@@ -319,7 +327,11 @@ const handleManualRegister = async () => {
       return;
     }
 
+    const passwordToRemember = registerPassword.value;
     successMessage.value = "Registration successful! You can sign in now.";
+    loginEmail.value = email;
+    loginPassword.value = passwordToRemember;
+    activeTab.value = "login";
     registerEmail.value = "";
     registerPassword.value = "";
     acceptedTerms.value = false;
@@ -479,6 +491,12 @@ const renderGoogleButtons = () => {
   }
 };
 
+const ensureGoogleButtons = async () => {
+  if (!googleInit) return;
+  await nextTick();
+  renderGoogleButtons();
+};
+
 const initGoogle = async () => {
   try {
     const res = await fetch("http://localhost:5000/api/auth/google-client-id");
@@ -486,6 +504,7 @@ const initGoogle = async () => {
     clientId = data.clientId;
     await loadGoogleScript();
     initializeGoogle();
+    await ensureGoogleButtons();
   } catch (err) {
     console.error("Failed to initialize Google Sign-In:", err);
     errorMessage.value = "Failed to load Google Sign-In.";
@@ -503,7 +522,7 @@ watch(
 );
 
 watch(activeTab, () => {
-  renderGoogleButtons();
+  ensureGoogleButtons();
 });
 </script>
 

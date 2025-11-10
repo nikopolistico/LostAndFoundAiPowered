@@ -199,9 +199,9 @@ router.get("/items", async (req, res) => {
   try {
     const result = await pool.query(
       `SELECT i.*, u.full_name AS reporter_name, u.email AS reporter_email, u.profile_picture AS reporter_profile_picture
-       FROM items i
-       LEFT JOIN users u ON i.reporter_id = u.id
-       ORDER BY i.created_at DESC`
+     FROM items i
+     LEFT JOIN users u ON u.id = i.reporter_id
+     ORDER BY i.created_at DESC`
     );
     res.json(result.rows);
   } catch (err) {
@@ -305,8 +305,8 @@ router.delete("/items/:id", async (req, res) => {
       return res.status(404).json({ message: "Item not found" });
     }
 
-  const item = itemRes.rows[0];
-  const shouldCascade = item.status === "returned";
+    const item = itemRes.rows[0];
+    const shouldCascade = item.status === "returned";
 
     const counterpartIds = await deleteItemCascade(item, shouldCascade);
 

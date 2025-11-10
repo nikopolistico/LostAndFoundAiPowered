@@ -2,22 +2,11 @@
   <aside class="w-64 bg-gray-900 p-6 flex flex-col space-y-6 text-white">
     <!-- 🔹 Static Admin Info -->
     <div class="flex items-center space-x-3 border-b border-gray-700 pb-4">
-      <div v-if="avatarUrl" class="w-12 h-12">
-        <img
-          :src="avatarUrl"
-          alt="Admin Avatar"
-          class="w-12 h-12 rounded-full object-cover border-2 border-yellow-400"
-        />
-      </div>
-      <div
-        v-else
-        class="w-12 h-12 rounded-full bg-yellow-500 text-gray-900 flex items-center justify-center text-xl font-bold border-2 border-yellow-400"
-      >
+      <div class="w-12 h-12 rounded-full bg-yellow-500 text-gray-900 flex items-center justify-center text-xl font-bold border-2 border-yellow-400">
         {{ avatarInitial }}
       </div>
       <div>
-        <p class="font-semibold">{{ displayName }}</p>
-        <p class="text-sm text-gray-400">{{ displayEmail }}</p>
+        <p class="font-semibold">{{ avatarInitial }}</p>
       </div>
     </div>
 
@@ -39,13 +28,7 @@
         @click="selectPage('users')"
         :class="navButtonClass('users')"
       >
-        Users
-      </button>
-      <button
-        @click="selectPage('categories')"
-        :class="navButtonClass('categories')"
-      >
-        Categories
+        Users Management
       </button>
     </nav>
 
@@ -61,8 +44,6 @@
 
 <script setup>
 import { ref, computed, onMounted } from "vue";
-
-const API_BASE_URL = "http://localhost:5000";
 
 // Track active page
 const activePage = ref("dashboard");
@@ -80,24 +61,13 @@ onMounted(() => {
   }
 });
 
-const displayName = computed(() => {
-  if (!adminUser.value) return "Administrator";
-  return (
-    adminUser.value.full_name ||
-    adminUser.value.email?.split("@")[0] ||
-    "Administrator"
-  );
+const avatarInitial = computed(() => {
+  const source =
+    adminUser.value?.full_name ||
+    adminUser.value?.email ||
+    "Administrator";
+  return source.trim().charAt(0).toUpperCase();
 });
-
-const displayEmail = computed(() => adminUser.value?.email || "admin@example.com");
-
-const avatarUrl = computed(() => {
-  const path = adminUser.value?.profile_picture;
-  if (!path) return "";
-  return path.startsWith("http") ? path : `${API_BASE_URL}${path}`;
-});
-
-const avatarInitial = computed(() => displayName.value.charAt(0).toUpperCase());
 
 // Emit event to parent when page is selected
 const emit = defineEmits(["select-page"]);

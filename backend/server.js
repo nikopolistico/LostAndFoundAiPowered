@@ -6,6 +6,7 @@ import path from "path";
 import http from "http";
 import { Server } from "socket.io";
 import pool from "./db.js";
+import { ensureDatabaseSchema } from "./services/schema.js";
 
 // ✅ Load environment variables
 dotenv.config();
@@ -23,6 +24,8 @@ if (missingEnvs.length > 0) {
   // Exit with non-zero so process managers know startup failed.
   process.exit(1);
 }
+
+await ensureDatabaseSchema();
 
 // ✅ Initialize Express app
 const app = express();
